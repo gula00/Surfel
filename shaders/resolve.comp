@@ -1,0 +1,38 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x=8, local_size_y=8) in;
+
+vec3 renderPixel(vec2 pixel, inout uint rng) {
+    vec2 p = (pixel/vec2(settings.width,settings.height))*2.0-1.0;
+    p.x *= float(settings.width)/float(settings.height);
+    p.y = -p.y;
+    vec3 origin = vec3(0, 1, 3.5);
+    vec3 direction = normalize(vec3(p*0.40, -1));
+    uint f; vec3 point;
+    if (!trace(origin,direction,100.0,f,point)) return vec3(0.015);
+    if (f==LIGHT_FACE) return faces[f].emission.rgb;
+    vec3 normal = normalOf(f);
+    if (dot(normal,-direction)<=0.0) return vec3(0);
+    // 主射线也用 Ray Query，省去 G-buffer、光栅管线和交换链，便于只关注 GI。
+    vec3 direct = directDiffuse(point,normal,32u,rng);
+    return faces[f].albedo.rgb*(direct+settings.indirectScale*cachedGI(f,point));
+}
+
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x>=settings.width || pixel.y>=settings.height) return;
+    uint rng = (pixel.y*settings.width+pixel.x+1u)*747796405u;
+    vec3 color = vec3(0);
+    // 固定 2x2 子像素采样，降低轮廓锯齿；直接光/GI 对照使用相同随机种子。
+    for (uint y=0; y<2; ++y)
+        for (uint x=0; x<2; ++x)
+            color += renderPixel(vec2(pixel)+(vec2(x,y)+0.5)*0.5,rng);
+    color *= 0.25;
+    color = color/(1.0+color); // 简单 Reinhard 色调映射
+    color = pow(clamp(color,0.0,1.0),vec3(1.0/2.2));
+    uvec3 rgb = uvec3(color*255.0+0.5);
+    // BMP 每像素 BGRA；CPU 端以 little-endian uint32 原样写出。
+    pixels[pixel.y*settings.width+pixel.x] = rgb.b | (rgb.g<<8) | (rgb.r<<16) | 0xff000000u;
+}

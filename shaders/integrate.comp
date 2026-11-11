@@ -1,0 +1,33 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x=64) in;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= settings.surfelCount) return;
+    Surfel surfel = surfels[id];
+    uint f = surfel.info.x;
+    vec3 normal = normalOf(f);
+    uint rng = (id+1u)*747796405u ^ (settings.bounce+1u)*2891336453u;
+    vec3 sum = vec3(0);
+
+    // 一个线程负责一个 surfel；光线数只由 surfel 数量决定，与输出分辨率无关。
+    for (uint i=0; i<settings.sampleCount; ++i) {
+        vec3 direction = cosineDirection(normal, rng);
+        uint hitFace; vec3 hitPoint;
+        if (!trace(surfel.position.xyz+normal*EPS, direction, 100.0, hitFace, hitPoint)) continue;
+        vec3 hitNormal = normalOf(hitFace);
+        if (dot(hitNormal, -direction)<=0.0) continue; // 本例材质只从正面反射
+        if (hitFace == LIGHT_FACE) continue;
+        // 灯本身的贡献由 directDiffuse 显式计算，避免与这里重复计入。
+        // 这里收集“灯 -> 命中表面 -> 当前 surfel”的间接光；下一轮再增加一次反弹。
+        vec3 incoming = directDiffuse(hitPoint, hitNormal, 4u, rng)
+                      + cachedGI(hitFace, hitPoint);
+        sum += faces[hitFace].albedo.rgb * incoming;
+    }
+    // 缓存的是间接入射光 E_indirect/pi，Resolve 时再乘接收面的 albedo。
+    // 输出与输入是不同缓冲区，同一轮线程不会读到其他线程刚写的半成品。
+    nextGI[id] = vec4(sum/float(settings.sampleCount), 1);
+}
